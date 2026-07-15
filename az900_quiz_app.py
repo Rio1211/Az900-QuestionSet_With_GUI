@@ -19,7 +19,7 @@ OFFICIAL_SCORE_MAX = 1000
 OFFICIAL_PASSING_SCORE = 700
 EXAM_QUESTION_COUNT = 45
 EXAM_DURATION_MINUTES = 45
-MOCK_TEST_IDS = ("mock_test_1", "mock_test_2")
+MOCK_TEST_IDS = ("mock_test_1", "mock_test_2", "mock_test_3")
 
 
 COLORS = {
@@ -366,6 +366,55 @@ def save_progress(progress):
     PROGRESS_FILE.write_text(json.dumps(progress, indent=2), encoding="utf-8")
 
 
+def resolve_last_location(question_sets, progress):
+    """Resolve saved practice state by question ID, with safe first-item fallbacks."""
+    set_by_id = {question_set["id"]: question_set for question_set in question_sets}
+    first_set = question_sets[0]
+    location = progress.get("last_location", {})
+    if not isinstance(location, dict):
+        location = {}
+
+    saved_set_id = location.get("set_id")
+    set_is_valid = saved_set_id in set_by_id
+    question_set = set_by_id[saved_set_id] if set_is_valid else first_set
+    questions = list(question_set["questions"])
+
+    saved_mode = location.get("mode")
+    mode_is_valid = saved_mode in ("all", "wrong")
+    mode = saved_mode if set_is_valid and mode_is_valid else "all"
+    if mode == "wrong":
+        set_progress = progress.get("sets", {}).get(question_set["id"], {})
+        wrong_ids = set(set_progress.get("wrong_question_ids", []))
+        active_questions = [
+            question for question in questions if question["id"] in wrong_ids
+        ]
+        if not active_questions:
+            mode = "all"
+            active_questions = list(questions)
+    else:
+        active_questions = list(questions)
+
+    current_index = 0
+    if set_is_valid and mode_is_valid and mode == saved_mode:
+        saved_question_id = location.get("question_id")
+        current_index = next(
+            (
+                index
+                for index, question in enumerate(active_questions)
+                if question["id"] == saved_question_id
+            ),
+            0,
+        )
+
+    return (
+        question_set["id"],
+        mode,
+        questions,
+        active_questions,
+        current_index,
+    )
+
+
 class QuizApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -379,12 +428,14 @@ class QuizApp(tk.Tk):
         self.set_id_by_label = {
             question_set["label"]: question_set["id"] for question_set in self.question_sets
         }
-        self.current_set_id = self.question_sets[0]["id"]
-        self.questions = list(self.question_sets[0]["questions"])
         self.progress = load_progress(self.question_sets)
-        self.mode = "all"
-        self.active_questions = list(self.questions)
-        self.current_index = 0
+        (
+            self.current_set_id,
+            self.mode,
+            self.questions,
+            self.active_questions,
+            self.current_index,
+        ) = resolve_last_location(self.question_sets, self.progress)
         self.selected_ids = set()
         self.checked = False
         self.session_answered = set()
@@ -401,7 +452,8 @@ class QuizApp(tk.Tk):
         self.shuffle_locked = tk.BooleanVar(value=False)
 
         self._build_ui()
-        self.set_selector.set(self.question_sets[0]["label"])
+        self.set_selector.set(self.set_by_id[self.current_set_id]["label"])
+        self.protocol("WM_DELETE_WINDOW", self.close_application)
         self.show_question()
 
     def _build_ui(self):
@@ -493,7 +545,9 @@ class QuizApp(tk.Tk):
         self.content.columnconfigure(0, weight=1)
         self.content.bind("<Configure>", self._update_content_scrollregion)
         self.content_canvas.bind("<Configure>", self._resize_content)
-        self.content_canvas.bind("<MouseWheel>", self._scroll_content)
+        self.bind("<MouseWheel>", self._scroll_content, add="+")
+        self.bind("<Button-4>", self._scroll_content, add="+")
+        self.bind("<Button-5>", self._scroll_content, add="+")
 
         question_box = tk.Frame(self.content, bg=COLORS["panel"])
         question_box.grid(row=0, column=0, sticky="ew", padx=20, pady=(18, 12))
@@ -643,7 +697,20 @@ class QuizApp(tk.Tk):
         self.content_canvas.itemconfigure(self.content_window, width=event.width)
 
     def _scroll_content(self, event):
-        self.content_canvas.yview_scroll(-1 * (event.delta // 120), "units")
+        if event.widget in (self.question_text, self.explanation_text):
+            first, last = event.widget.yview()
+            scrolling_up = getattr(event, "delta", 0) > 0 or getattr(event, "num", 0) == 4
+            if (scrolling_up and first > 0) or (not scrolling_up and last < 1):
+                return None
+
+        delta = getattr(event, "delta", 0)
+        if delta:
+            direction = -1 if delta > 0 else 1
+            units = direction * max(1, abs(delta) // 120)
+        else:
+            units = -1 if getattr(event, "num", 0) == 4 else 1
+        self.content_canvas.yview_scroll(units, "units")
+        return "break"
 
     def _resize_option_wrap(self, event=None):
         width = event.width if event else self.options_frame.winfo_width()
@@ -1059,6 +1126,7 @@ class QuizApp(tk.Tk):
         self.close_question_list()
         self.current_index = selected_index
         self.show_question()
+        self.save_last_location()
         self.lift()
         self.focus_force()
 
@@ -1081,6 +1149,21 @@ class QuizApp(tk.Tk):
         return self.progress["sets"].setdefault(
             set_id, {"wrong_question_ids": [], "history": {}}
         )
+
+    def save_last_location(self):
+        if self.mode not in ("all", "wrong"):
+            return
+        question = self.current_question()
+        self.progress["last_location"] = {
+            "set_id": self.current_set_id,
+            "mode": self.mode,
+            "question_id": question["id"] if question is not None else None,
+        }
+        save_progress(self.progress)
+
+    def close_application(self):
+        self.save_last_location()
+        self.destroy()
 
     def set_question_text(self, text):
         self.question_text.configure(state="normal")
@@ -1374,6 +1457,7 @@ class QuizApp(tk.Tk):
         if self.current_index < len(self.active_questions) - 1:
             self.current_index += 1
             self.show_question()
+            self.save_last_location()
         else:
             self.show_rate()
 
@@ -1383,6 +1467,7 @@ class QuizApp(tk.Tk):
         if self.current_index > 0:
             self.current_index -= 1
             self.show_question()
+            self.save_last_location()
 
     def change_question_set(self, event=None):
         selected_label = self.set_selector.get()
@@ -1394,12 +1479,14 @@ class QuizApp(tk.Tk):
         self.mode = "all"
         self.active_questions = list(self.questions)
         self.reset_session()
+        self.save_last_location()
 
     def use_all_mode(self):
         self.mode = "all"
         self.active_questions = list(self.questions)
         self.current_index = 0
         self.show_question()
+        self.save_last_location()
 
     def use_wrong_mode(self):
         wrong_ids = set(self.current_set_progress().get("wrong_question_ids", []))
@@ -1407,6 +1494,7 @@ class QuizApp(tk.Tk):
         self.active_questions = [q for q in self.questions if q["id"] in wrong_ids]
         self.current_index = 0
         self.show_question()
+        self.save_last_location()
 
     def shuffle_questions(self):
         if self.shuffle_locked.get() or not self.active_questions:
