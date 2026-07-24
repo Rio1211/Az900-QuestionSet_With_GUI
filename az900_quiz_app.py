@@ -303,20 +303,101 @@ def load_question_sets():
         for test_id in MOCK_TEST_IDS
         if (QUESTION_SETS_DIR / f"{test_id}.json").exists()
     ]
-    question_set_paths = mock_test_paths or [
+    mock_test_names = {path.name for path in mock_test_paths}
+    additional_paths = sorted(
+        path
+        for path in QUESTION_SETS_DIR.glob("*.json")
+        if path.name not in mock_test_names
+        and path.name != "example_question_set.json"
+    )
+    question_set_paths = (mock_test_paths + additional_paths) or [
         QUESTION_SETS_DIR / "example_question_set.json"
     ]
-    sets = []
+    raw_sets = []
     for path in question_set_paths:
         data = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(data, list):
+            set_id = path.stem
             label = path.stem.replace("_", " ").title()
             questions = data
+            question_refs = []
+            include_in_exam = True
         else:
+            set_id = data.get("id") or path.stem
             label = data.get("label") or path.stem.replace("_", " ").title()
             questions = data.get("questions", [])
+            question_refs = data.get("question_refs", [])
+            include_in_exam = data.get("include_in_exam", True)
+        raw_sets.append(
+            {
+                "id": set_id,
+                "label": label,
+                "questions": questions,
+                "question_refs": question_refs,
+                "include_in_exam": include_in_exam,
+            }
+        )
+
+    set_by_id = {}
+    for question_set in raw_sets:
+        set_id = question_set["id"]
+        if set_id in set_by_id:
+            raise ValueError(f"Duplicate question set ID: {set_id}")
+        set_by_id[set_id] = question_set
+
+    resolved_questions = {}
+
+    def resolve_questions(question_set, resolving=()):
+        set_id = question_set["id"]
+        if set_id in resolved_questions:
+            return resolved_questions[set_id]
+        if set_id in resolving:
+            chain = " -> ".join((*resolving, set_id))
+            raise ValueError(f"Circular question set reference: {chain}")
+
+        references = question_set["question_refs"]
+        if not references:
+            questions = list(question_set["questions"])
+        else:
+            questions = []
+            for reference in references:
+                source_set_id = reference["set_id"]
+                source_question_id = str(reference["question_id"])
+                source_set = set_by_id.get(source_set_id)
+                if source_set is None:
+                    raise ValueError(
+                        f"Question set {set_id} references missing set {source_set_id}."
+                    )
+                source_questions = resolve_questions(source_set, (*resolving, set_id))
+                question = next(
+                    (
+                        item
+                        for item in source_questions
+                        if str(item.get("id")) == source_question_id
+                    ),
+                    None,
+                )
+                if question is None:
+                    raise ValueError(
+                        f"Question set {set_id} references missing question "
+                        f"{source_set_id}/{source_question_id}."
+                    )
+                questions.append(question)
+        resolved_questions[set_id] = questions
+        return questions
+
+    sets = []
+    for question_set in raw_sets:
+        questions = resolve_questions(question_set)
         if questions:
-            sets.append({"id": path.stem, "label": label, "questions": questions})
+            sets.append(
+                {
+                    "id": question_set["id"],
+                    "label": question_set["label"],
+                    "questions": questions,
+                    "include_in_exam": question_set["include_in_exam"],
+                }
+            )
     if not sets:
         raise FileNotFoundError("No question sets found in question_sets.")
     return sets
@@ -437,9 +518,11 @@ class QuizApp(tk.Tk):
             self.current_index,
         ) = resolve_last_location(self.question_sets, self.progress)
         self.selected_ids = set()
+        self.allow_additional_answers = False
         self.checked = False
         self.session_answered = set()
         self.session_correct = 0
+        self.practice_history = []
         self.option_widgets = []
         self.question_list_window = None
         self.question_list_tree = None
@@ -574,6 +657,18 @@ class QuizApp(tk.Tk):
         question_scroll.grid(row=0, column=1, sticky="ns")
         self.question_text.configure(yscrollcommand=question_scroll.set)
 
+        answer_controls = tk.Frame(question_box, bg=COLORS["panel"])
+        answer_controls.grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(10, 0)
+        )
+        self.additional_answer_button = ttk.Button(
+            answer_controls,
+            text="Add Another Answer",
+            command=self.enable_additional_answers,
+        )
+        self.additional_answer_button.pack(side="left")
+        self.additional_answer_button.state(["disabled"])
+
         self.visual_frame = tk.Frame(self.content, bg=COLORS["panel"])
         self.visual_frame.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 8))
         self.visual_frame.columnconfigure(0, weight=1)
@@ -595,7 +690,7 @@ class QuizApp(tk.Tk):
 
         bottom = tk.Frame(self.card, bg=COLORS["panel"])
         bottom.grid(row=1, column=0, columnspan=2, sticky="ew", padx=20, pady=14)
-        bottom.columnconfigure(2, weight=1)
+        bottom.columnconfigure(3, weight=1)
 
         self.result_label = tk.Label(
             self.feedback_frame,
@@ -660,19 +755,24 @@ class QuizApp(tk.Tk):
         ttk.Button(bottom, text="Question List", command=self.open_question_list).grid(
             row=0, column=1, sticky="w", padx=(8, 0)
         )
+        self.back_button = ttk.Button(
+            bottom, text="Back to Last View", command=self.go_back_to_previous_view
+        )
+        self.back_button.grid(row=0, column=2, sticky="w", padx=(8, 0))
+        self.back_button.state(["disabled"])
         self.check_button = ttk.Button(bottom, text="Check", command=self.check_answer)
         self.check_button.grid(
-            row=0, column=2, sticky="e", padx=4
+            row=0, column=3, sticky="e", padx=4
         )
         self.next_button = ttk.Button(bottom, text="Next", command=self.next_question)
         self.next_button.grid(
-            row=0, column=3, sticky="e", padx=4
+            row=0, column=4, sticky="e", padx=4
         )
         self.finish_button = ttk.Button(
             bottom, text="Finish / Rate", command=self.show_rate
         )
         self.finish_button.grid(
-            row=0, column=4, sticky="e", padx=4
+            row=0, column=5, sticky="e", padx=4
         )
 
         footer = ttk.Frame(self)
@@ -758,6 +858,8 @@ class QuizApp(tk.Tk):
     def build_exam_questions(self):
         pools = []
         for question_set in self.question_sets:
+            if not question_set.get("include_in_exam", True):
+                continue
             questions = []
             for original in question_set["questions"]:
                 if original.get("type") == "visual_review":
@@ -797,6 +899,7 @@ class QuizApp(tk.Tk):
                 for question in question_set["questions"]
             )
             for question_set in self.question_sets
+            if question_set.get("include_in_exam", True)
         )
         if total_questions < EXAM_QUESTION_COUNT:
             messagebox.showerror(
@@ -832,6 +935,7 @@ class QuizApp(tk.Tk):
         locked_buttons = (
             self.all_questions_button,
             self.wrong_set_button,
+            self.back_button,
             self.shuffle_button,
             self.reset_button,
             self.clear_wrong_button,
@@ -850,6 +954,7 @@ class QuizApp(tk.Tk):
                 button.state(["!disabled"])
             self.shuffle_lock_toggle.state(["!disabled"])
             self.update_shuffle_lock()
+            self.update_back_button()
             self.check_button.state(["!disabled"])
             self.finish_button.configure(text="Finish / Rate")
             self.exam_button.configure(text="Start Exam (45 min)")
@@ -1150,15 +1255,103 @@ class QuizApp(tk.Tk):
             set_id, {"wrong_question_ids": [], "history": {}}
         )
 
-    def save_last_location(self):
+    def current_practice_location(self):
         if self.mode not in ("all", "wrong"):
-            return
+            return None
         question = self.current_question()
-        self.progress["last_location"] = {
+        return {
             "set_id": self.current_set_id,
             "mode": self.mode,
             "question_id": question["id"] if question is not None else None,
         }
+
+    def remember_set_location(self, location):
+        if location is None:
+            return
+        set_progress = self.progress_for_set(location["set_id"])
+        set_progress["last_view"] = {
+            "mode": location["mode"],
+            "question_id": location["question_id"],
+        }
+
+    def saved_set_location(self, set_id):
+        saved_view = self.progress_for_set(set_id).get("last_view", {})
+        if not isinstance(saved_view, dict):
+            saved_view = {}
+        return {
+            "set_id": set_id,
+            "mode": saved_view.get("mode", "all"),
+            "question_id": saved_view.get("question_id"),
+        }
+
+    def restore_set_location(self, set_id):
+        restore_progress = dict(self.progress)
+        restore_progress["last_location"] = self.saved_set_location(set_id)
+        (
+            self.current_set_id,
+            self.mode,
+            self.questions,
+            self.active_questions,
+            self.current_index,
+        ) = resolve_last_location(self.question_sets, restore_progress)
+
+    def capture_practice_state(self):
+        location = self.current_practice_location()
+        if location is None:
+            return None
+        return {
+            "location": location,
+            "session_answered": set(self.session_answered),
+            "session_correct": self.session_correct,
+        }
+
+    def remember_practice_state(self, state):
+        if state is None or state["location"] == self.current_practice_location():
+            return
+        if (
+            self.practice_history
+            and self.practice_history[-1]["location"] == state["location"]
+        ):
+            self.practice_history[-1] = state
+        else:
+            self.practice_history.append(state)
+        self.update_back_button()
+
+    def update_back_button(self):
+        if self.mode == "exam" or not self.practice_history:
+            self.back_button.state(["disabled"])
+        else:
+            self.back_button.state(["!disabled"])
+
+    def go_back_to_previous_view(self):
+        if self.mode == "exam" or not self.practice_history:
+            return
+
+        state = self.practice_history.pop()
+        restore_progress = dict(self.progress)
+        restore_progress["last_location"] = state["location"]
+        previous_set_id = self.current_set_id
+        (
+            self.current_set_id,
+            self.mode,
+            self.questions,
+            self.active_questions,
+            self.current_index,
+        ) = resolve_last_location(self.question_sets, restore_progress)
+        if self.current_set_id != previous_set_id:
+            self.session_answered = set(state["session_answered"])
+            self.session_correct = state["session_correct"]
+        self.set_selector.set(self.set_by_id[self.current_set_id]["label"])
+        self.show_question()
+        self.save_last_location()
+        self.update_back_button()
+
+    def save_last_location(self):
+        location = self.current_practice_location()
+        if location is None:
+            return
+        self.remember_set_location(location)
+        self.progress["last_location"] = location
         save_progress(self.progress)
 
     def close_application(self):
@@ -1174,6 +1367,7 @@ class QuizApp(tk.Tk):
     def show_question(self):
         question = self.current_question()
         self.selected_ids = set()
+        self.allow_additional_answers = False
         self.checked = False
         self.result_label.config(text="")
         self.set_explanation("")
@@ -1196,6 +1390,7 @@ class QuizApp(tk.Tk):
         self.option_widgets = []
 
         if question is None:
+            self.update_additional_answer_button(None)
             self.set_question_text(
                 "No questions in this mode. Answer questions incorrectly first, or switch back to All Questions."
             )
@@ -1209,6 +1404,10 @@ class QuizApp(tk.Tk):
             source_text = f" | {question['_source_set_label']}"
         else:
             source_text = ""
+        self.allow_additional_answers = (
+            question.get("type") == "multiple" or len(self.selected_ids) > 1
+        )
+        self.update_additional_answer_button(question)
         self.set_question_text(
             f"Question {self.current_index + 1} of {len(self.active_questions)}"
             f"{source_text}\n{question['question']}"
@@ -1249,11 +1448,37 @@ class QuizApp(tk.Tk):
 
         self.update_status()
 
+    def update_additional_answer_button(self, question):
+        can_enable = (
+            question is not None
+            and question.get("type") != "visual_review"
+            and len(question.get("answers", [])) > 1
+            and not self.checked
+        )
+        if self.allow_additional_answers:
+            self.additional_answer_button.configure(text="Multiple Answers Enabled")
+            self.additional_answer_button.state(["disabled"])
+        else:
+            self.additional_answer_button.configure(text="Add Another Answer")
+            if can_enable:
+                self.additional_answer_button.state(["!disabled"])
+            else:
+                self.additional_answer_button.state(["disabled"])
+
+    def enable_additional_answers(self):
+        question = self.current_question()
+        if question is None or self.checked:
+            return
+        if question.get("type") == "visual_review":
+            return
+        self.allow_additional_answers = True
+        self.update_additional_answer_button(question)
+
     def select_answer(self, answer_id):
         if self.checked:
             return
         question = self.current_question()
-        if question["type"] == "single":
+        if question["type"] == "single" and not self.allow_additional_answers:
             self.selected_ids = {answer_id}
         elif answer_id in self.selected_ids:
             self.selected_ids.remove(answer_id)
@@ -1296,6 +1521,7 @@ class QuizApp(tk.Tk):
         correct_ids = {answer["id"] for answer in question["answers"] if answer["correct"]}
         is_correct = self.selected_ids == correct_ids
         self.checked = True
+        self.update_additional_answer_button(question)
         self.paint_options()
 
         if question["id"] not in self.session_answered:
@@ -1474,26 +1700,33 @@ class QuizApp(tk.Tk):
         selected_set_id = self.set_id_by_label.get(selected_label)
         if not selected_set_id or selected_set_id == self.current_set_id:
             return
-        self.current_set_id = selected_set_id
-        self.questions = list(self.set_by_id[selected_set_id]["questions"])
-        self.mode = "all"
-        self.active_questions = list(self.questions)
-        self.reset_session()
+        previous_state = self.capture_practice_state()
+        if previous_state is not None:
+            self.remember_set_location(previous_state["location"])
+        self.restore_set_location(selected_set_id)
+        self.session_answered.clear()
+        self.session_correct = 0
+        self.show_question()
+        self.remember_practice_state(previous_state)
         self.save_last_location()
 
     def use_all_mode(self):
+        previous_state = self.capture_practice_state()
         self.mode = "all"
         self.active_questions = list(self.questions)
         self.current_index = 0
         self.show_question()
+        self.remember_practice_state(previous_state)
         self.save_last_location()
 
     def use_wrong_mode(self):
+        previous_state = self.capture_practice_state()
         wrong_ids = set(self.current_set_progress().get("wrong_question_ids", []))
         self.mode = "wrong"
         self.active_questions = [q for q in self.questions if q["id"] in wrong_ids]
         self.current_index = 0
         self.show_question()
+        self.remember_practice_state(previous_state)
         self.save_last_location()
 
     def shuffle_questions(self):
