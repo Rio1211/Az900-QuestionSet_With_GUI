@@ -668,6 +668,13 @@ class QuizApp(tk.Tk):
         )
         self.additional_answer_button.pack(side="left")
         self.additional_answer_button.state(["disabled"])
+        self.reveal_button = ttk.Button(
+            answer_controls,
+            text="Reveal Correct Answer(s)",
+            command=self.reveal_correct_answers,
+        )
+        self.reveal_button.pack(side="left", padx=(8, 0))
+        self.reveal_button.state(["disabled"])
 
         self.visual_frame = tk.Frame(self.content, bg=COLORS["panel"])
         self.visual_frame.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 8))
@@ -939,6 +946,7 @@ class QuizApp(tk.Tk):
             self.shuffle_button,
             self.reset_button,
             self.clear_wrong_button,
+            self.reveal_button,
         )
         if active:
             self.set_selector.configure(state="disabled")
@@ -1391,6 +1399,7 @@ class QuizApp(tk.Tk):
 
         if question is None:
             self.update_additional_answer_button(None)
+            self.update_reveal_button(None)
             self.set_question_text(
                 "No questions in this mode. Answer questions incorrectly first, or switch back to All Questions."
             )
@@ -1408,6 +1417,7 @@ class QuizApp(tk.Tk):
             question.get("type") == "multiple" or len(self.selected_ids) > 1
         )
         self.update_additional_answer_button(question)
+        self.update_reveal_button(question)
         self.set_question_text(
             f"Question {self.current_index + 1} of {len(self.active_questions)}"
             f"{source_text}\n{question['question']}"
@@ -1464,6 +1474,19 @@ class QuizApp(tk.Tk):
                 self.additional_answer_button.state(["!disabled"])
             else:
                 self.additional_answer_button.state(["disabled"])
+
+    def update_reveal_button(self, question):
+        can_reveal = (
+            self.mode != "exam"
+            and question is not None
+            and question.get("type") != "visual_review"
+            and bool(question.get("answers"))
+            and not self.checked
+        )
+        if can_reveal:
+            self.reveal_button.state(["!disabled"])
+        else:
+            self.reveal_button.state(["disabled"])
 
     def enable_additional_answers(self):
         question = self.current_question()
@@ -1522,6 +1545,7 @@ class QuizApp(tk.Tk):
         is_correct = self.selected_ids == correct_ids
         self.checked = True
         self.update_additional_answer_button(question)
+        self.update_reveal_button(question)
         self.paint_options()
 
         if question["id"] not in self.session_answered:
@@ -1538,10 +1562,36 @@ class QuizApp(tk.Tk):
         self._update_content_scrollregion()
         self.update_status()
 
+    def reveal_correct_answers(self):
+        if self.mode == "exam" or self.checked:
+            return
+        question = self.current_question()
+        if question is None:
+            return
+        if question.get("type") == "visual_review":
+            self.reveal_visual_answer(question)
+            return
+
+        self.checked = True
+        self.update_additional_answer_button(question)
+        self.update_reveal_button(question)
+        self.check_button.state(["disabled"])
+        self.paint_options()
+        self.result_label.config(
+            text="Correct answer revealed. This was not recorded as an attempt."
+        )
+        self.set_explanation(
+            self.build_explanation(question, False, include_selected=False)
+        )
+        self.feedback_frame.grid()
+        self._update_content_scrollregion()
+        self.update_status()
+
     def reveal_visual_answer(self, question):
         if self.checked:
             return
         self.checked = True
+        self.update_reveal_button(question)
         answer_shown = self.show_image(
             self.answer_image_label,
             question.get("answer_image"),
@@ -1598,7 +1648,7 @@ class QuizApp(tk.Tk):
         if save:
             save_progress(self.progress)
 
-    def build_explanation(self, question, is_correct):
+    def build_explanation(self, question, is_correct, include_selected=True):
         if question.get("type") == "visual_review":
             lines = [
                 "This visual question is self-assessed because its interaction is image-based.",
@@ -1617,14 +1667,14 @@ class QuizApp(tk.Tk):
             for answer in question["answers"]
             if answer["id"] in self.selected_ids
         ]
-        lines = [
-            f"Your answer: {', '.join(selected_answers)}",
-            (
-                f"Source PDF answer: {', '.join(correct_answers)}"
-                if question.get("source_answer_unverified")
-                else f"Correct answer: {', '.join(correct_answers)}"
-            ),
-        ]
+        lines = []
+        if include_selected:
+            lines.append(f"Your answer: {', '.join(selected_answers)}")
+        lines.append(
+            f"Source PDF answer: {', '.join(correct_answers)}"
+            if question.get("source_answer_unverified")
+            else f"Correct answer: {', '.join(correct_answers)}"
+        )
         if question.get("explanation"):
             lines.append("")
             lines.append(question["explanation"])
