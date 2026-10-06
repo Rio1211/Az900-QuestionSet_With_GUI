@@ -1,4 +1,4 @@
-# AZ-900 Local Question Set App
+# Local Question Set App (AZ-900 and A+ Exam)
 
 This is an offline Python/Tkinter practice-test application. Private question data is stored locally and is not included in the repository.
 
@@ -22,7 +22,10 @@ python az900_quiz_app.py
 - Use the `Question Set` dropdown to switch between labeled mock tests.
 - Use `Question List` to search by question number or text, then double-click a question to jump to it.
 - Use the small `Lock` checkbox beside `Shuffle` to prevent accidental reshuffling; clear it to unlock Shuffle.
-- Use `Start Exam (45 min)` for a timed exam with 45 random questions drawn across all available question sets.
+- Use `Start Exam (45 min)` for a timed AZ-900 exam with 45 random questions drawn across the AZ-900 question sets.
+- Select `A+ Exam` to practice the 23 questions imported from the supplied A+ results, with their original question numbers, answer keys, explanations, and domains.
+- A+ Exam supports the same checking, answer reveal, wrong set, shuffle lock, search, navigation, session reset, and saved progress features. Its timed practice uses up to 45 questions from the A+ group only (currently all 23), with a 45-minute practice timer.
+- A+ results show correct-answer counts and accuracy. This imported set and its timer are for practice; they are not a full official CompTIA exam or an official score estimate.
 - Exam answers are saved while you navigate, correctness stays hidden until submission, and incorrect or unanswered questions are added to their source question set's wrong list.
 
 Microsoft uses scaled scoring, so an official score of 700 does not necessarily mean 70% of questions were answered correctly. This app uses equal question weights to provide a clearly labeled practice estimate; in a 45-question exam, that estimate requires at least 32 correct answers to reach 700.
@@ -66,3 +69,5 @@ Create another local JSON file in `question_sets`, for example `my_test.json`:
 ```
 
 Restart the app after adding a new file. The dropdown will show the new label.
+
+Question sets default to the `az900` exam group and its existing practice score estimate. For a separate subject, add `"exam_group": "a_plus"`, `"practice_title": "A+ Exam"`, and `"score_mode": "accuracy"` at the JSON top level. Sets in different exam groups are never mixed during timed practice. Wrong answers and saved locations remain separate for each question set ID.

@@ -322,12 +322,18 @@ def load_question_sets():
             questions = data
             question_refs = []
             include_in_exam = True
+            exam_group = "az900"
+            practice_title = "AZ-900 Practice"
+            score_mode = "scaled"
         else:
             set_id = data.get("id") or path.stem
             label = data.get("label") or path.stem.replace("_", " ").title()
             questions = data.get("questions", [])
             question_refs = data.get("question_refs", [])
             include_in_exam = data.get("include_in_exam", True)
+            exam_group = data.get("exam_group", "az900")
+            practice_title = data.get("practice_title", "AZ-900 Practice")
+            score_mode = data.get("score_mode", "scaled")
         raw_sets.append(
             {
                 "id": set_id,
@@ -335,6 +341,9 @@ def load_question_sets():
                 "questions": questions,
                 "question_refs": question_refs,
                 "include_in_exam": include_in_exam,
+                "exam_group": exam_group,
+                "practice_title": practice_title,
+                "score_mode": score_mode,
             }
         )
 
@@ -396,6 +405,9 @@ def load_question_sets():
                     "label": question_set["label"],
                     "questions": questions,
                     "include_in_exam": question_set["include_in_exam"],
+                    "exam_group": question_set["exam_group"],
+                    "practice_title": question_set["practice_title"],
+                    "score_mode": question_set["score_mode"],
                 }
             )
     if not sets:
@@ -862,11 +874,50 @@ class QuizApp(tk.Tk):
         ):
             self.finish_exam_mode()
 
+    def uses_accuracy_scores(self):
+        return self.set_by_id[self.current_set_id].get("score_mode") == "accuracy"
+
+    def exam_question_sets(self):
+        exam_group = self.set_by_id[self.current_set_id].get("exam_group", "az900")
+        return [
+            question_set
+            for question_set in self.question_sets
+            if question_set.get("include_in_exam", True)
+            and question_set.get("exam_group", "az900") == exam_group
+        ]
+
+    def update_set_identity(self):
+        question_set = self.set_by_id[self.current_set_id]
+        practice_title = question_set.get("practice_title", "AZ-900 Practice")
+        self.title_label.configure(text=practice_title)
+        if question_set.get("exam_group", "az900") == "az900":
+            self.title("AZ-900 Local Question Set")
+        else:
+            self.title(f"{practice_title} Local Question Set")
+        if self.mode != "exam":
+            self.exam_button.configure(text=f"Start Exam ({EXAM_DURATION_MINUTES} min)")
+
+    def practice_result_message(self, correct_count, question_count, details=""):
+        rate = (correct_count / question_count) * 100
+        result_message = (
+            f"Correct: {correct_count}/{question_count}\n"
+            f"Accuracy: {rate:.1f}%\n"
+        ) + details
+        if self.uses_accuracy_scores():
+            return result_message + "\nLocal practice result."
+        scaled_score = estimated_scaled_score(correct_count, question_count)
+        status = "PASS" if scaled_score >= OFFICIAL_PASSING_SCORE else "NOT PASS"
+        return result_message + (
+            f"Estimated scaled score: {scaled_score}/{OFFICIAL_SCORE_MAX}\n"
+            f"Result: {status}\n"
+            f"Microsoft passing score: {OFFICIAL_PASSING_SCORE}/{OFFICIAL_SCORE_MAX}\n\n"
+            "Practice estimate only. The real Microsoft exam uses scaled scoring, "
+            "so 700 does not necessarily equal 70% correct."
+        )
+
     def build_exam_questions(self):
         pools = []
-        for question_set in self.question_sets:
-            if not question_set.get("include_in_exam", True):
-                continue
+        for question_set in self.exam_question_sets():
             questions = []
             for original in question_set["questions"]:
                 if original.get("type") == "visual_review":
@@ -905,25 +956,31 @@ class QuizApp(tk.Tk):
                 and any(answer.get("correct") for answer in question["answers"])
                 for question in question_set["questions"]
             )
-            for question_set in self.question_sets
-            if question_set.get("include_in_exam", True)
+            for question_set in self.exam_question_sets()
         )
-        if total_questions < EXAM_QUESTION_COUNT:
+        is_az900 = self.set_by_id[self.current_set_id].get("exam_group", "az900") == "az900"
+        if total_questions == 0 or (is_az900 and total_questions < EXAM_QUESTION_COUNT):
             messagebox.showerror(
                 "Exam Mode",
-                f"Exam mode needs at least {EXAM_QUESTION_COUNT} questions. "
+                f"Exam mode needs at least {EXAM_QUESTION_COUNT if is_az900 else 1} questions. "
                 f"Only {total_questions} are currently available.",
             )
             return
 
+        question_count = min(EXAM_QUESTION_COUNT, total_questions)
+        pass_target = ""
+        if not self.uses_accuracy_scores():
+            pass_target = (
+                f"Practice pass target: {minimum_correct_for_estimated_pass(question_count)}"
+                f"/{question_count} questions (estimated {OFFICIAL_PASSING_SCORE}"
+                f"/{OFFICIAL_SCORE_MAX})."
+            )
         if confirm and not messagebox.askyesno(
             "Start Exam",
             f"Start a {EXAM_DURATION_MINUTES}-minute exam with "
-            f"{EXAM_QUESTION_COUNT} random questions?\n\n"
+            f"{question_count} random questions?\n\n"
             "Correctness will stay hidden until the exam is submitted.\n"
-            f"Practice pass target: {minimum_correct_for_estimated_pass(EXAM_QUESTION_COUNT)}"
-            f"/{EXAM_QUESTION_COUNT} questions (estimated {OFFICIAL_PASSING_SCORE}"
-            f"/{OFFICIAL_SCORE_MAX}).",
+            + pass_target,
         ):
             return
 
@@ -1030,21 +1087,12 @@ class QuizApp(tk.Tk):
 
         save_progress(self.progress)
         question_count = len(self.active_questions)
-        rate = (correct_count / question_count) * 100
-        scaled_score = estimated_scaled_score(correct_count, question_count)
-        status = "PASS" if scaled_score >= OFFICIAL_PASSING_SCORE else "NOT PASS"
         wrong_count = question_count - correct_count
         title = "Exam Time Expired" if timed_out else "Exam Result"
-        result_message = (
-            f"Correct: {correct_count}/{question_count}\n"
-            f"Accuracy: {rate:.1f}%\n"
-            f"Estimated scaled score: {scaled_score}/{OFFICIAL_SCORE_MAX}\n"
-            f"Result: {status}\n"
-            f"Incorrect: {wrong_count}\n"
-            f"Unanswered: {unanswered_count}\n"
-            f"Microsoft passing score: {OFFICIAL_PASSING_SCORE}/{OFFICIAL_SCORE_MAX}\n\n"
-            "Practice estimate only. The real Microsoft exam uses scaled scoring, "
-            "so 700 does not necessarily equal 70% correct."
+        result_message = self.practice_result_message(
+            correct_count,
+            question_count,
+            details=f"Incorrect: {wrong_count}\nUnanswered: {unanswered_count}\n",
         )
 
         self.finish_exam_mode()
@@ -1087,7 +1135,7 @@ class QuizApp(tk.Tk):
         window.rowconfigure(2, weight=1)
 
         set_label = (
-            "All Question Sets"
+            self.set_by_id[self.current_set_id].get("practice_title", "AZ-900 Practice")
             if self.mode == "exam"
             else self.set_by_id[self.current_set_id]["label"]
         )
@@ -1373,6 +1421,7 @@ class QuizApp(tk.Tk):
         self.question_text.configure(state="disabled")
 
     def show_question(self):
+        self.update_set_identity()
         question = self.current_question()
         self.selected_ids = set()
         self.allow_additional_answers = False
@@ -1687,11 +1736,11 @@ class QuizApp(tk.Tk):
                 )
             else:
                 lines.append(
-                    "Why: the local source HTML marks the highlighted option as correct. "
+                    "Why: the local question source marks the highlighted option as correct. "
                     "The other choices are marked incorrect in the same source question."
                 )
                 lines.append(
-                    "Tip: edit the active file in question_sets if you want to add your own detailed AZ-900 explanation for this question."
+                    "Tip: edit the active file in question_sets if you want to add your own detailed explanation for this question."
                 )
         self.append_community_votes(lines, question)
         return "\n".join(lines)
@@ -1718,7 +1767,7 @@ class QuizApp(tk.Tk):
             for vote in votes:
                 lines.append(f"Choice combination {vote['choice']}: {vote['percentage']}%")
             lines.append("The PDF poll reports answer combinations for this multi-select question.")
-        lines.append("Community votes are informal and are not an official Microsoft answer key.")
+        lines.append("Community votes are informal and are not an official answer key.")
 
     def set_explanation(self, text):
         self.explanation_text.configure(state="normal")
@@ -1816,15 +1865,22 @@ class QuizApp(tk.Tk):
             return
 
         answered = len(self.session_answered)
-        scaled_score = estimated_scaled_score(self.session_correct, answered)
         wrong_count = len(self.current_set_progress().get("wrong_question_ids", []))
         mode_label = "Wrong Question Set" if self.mode == "wrong" else "All Questions"
         set_label = self.set_by_id[self.current_set_id]["label"]
+        if self.uses_accuracy_scores():
+            rate = (self.session_correct / answered) * 100 if answered else 0
+            score_text = f"| Accuracy: {rate:.1f}% "
+        else:
+            scaled_score = estimated_scaled_score(self.session_correct, answered)
+            score_text = (
+                f"| Est. score: {scaled_score}/{OFFICIAL_SCORE_MAX} "
+                f"| Pass: {OFFICIAL_PASSING_SCORE} "
+            )
         self.status_label.config(
             text=(
                 f"Set: {set_label} | {mode_label} | Session: {self.session_correct}/{answered} "
-                f"| Est. score: {scaled_score}/{OFFICIAL_SCORE_MAX} "
-                f"| Pass: {OFFICIAL_PASSING_SCORE} | Wrong: {wrong_count}"
+                f"{score_text}| Wrong: {wrong_count}"
             )
         )
 
@@ -1836,20 +1892,9 @@ class QuizApp(tk.Tk):
         if answered == 0:
             messagebox.showinfo("Rate", "No checked answers in this session yet.")
             return
-        rate = (self.session_correct / answered) * 100
-        scaled_score = estimated_scaled_score(self.session_correct, answered)
-        status = "PASS" if scaled_score >= OFFICIAL_PASSING_SCORE else "NOT PASS"
         messagebox.showinfo(
             "Practice Result",
-            (
-                f"Correct: {self.session_correct}/{answered}\n"
-                f"Accuracy: {rate:.1f}%\n"
-                f"Estimated scaled score: {scaled_score}/{OFFICIAL_SCORE_MAX}\n"
-                f"Result: {status}\n"
-                f"Microsoft passing score: {OFFICIAL_PASSING_SCORE}/{OFFICIAL_SCORE_MAX}\n\n"
-                "Practice estimate only. The real Microsoft exam uses scaled scoring, "
-                "so 700 does not necessarily equal 70% correct."
-            ),
+            self.practice_result_message(self.session_correct, answered),
         )
 
 
